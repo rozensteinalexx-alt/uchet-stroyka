@@ -7,105 +7,132 @@ import json
 import time
 from datetime import datetime
 import tempfile
+import os
 
 # ==========================================
-# 1. НАСТРОЙКИ
+# 1. НАСТРОЙКИ (МОЖЕШЬ МЕНЯТЬ)
 # ==========================================
-API_KEY = "AIzaSyCPm3R27R93WGid1jfVx22LAJoBvYMpM5c" # Твой ключ
-JSON_FILE = 'service_account.json'
+# Вставь сюда свой API ключ Gemini
+API_KEY = "AIzaSyCPm3R27R93WGid1jfVx22LAJoBvYMpM5c" 
+
+# Имя твоей Гугл Таблицы (должно совпадать точь-в-точь)
 SHEET_NAME = "Materials 2026"
 
-# Список твоих объектов (они станут названиями листов!)
-OBJECTS = ["Квартира Центр", "Дом Загород", "Офис", "Склад", "Новый Объект"]
+# Список твоих объектов (они будут в выпадающем списке)
+OBJECTS = ["Квартира Центр", "Дом Загород", "Офис", "Склад", "Личные расходы"]
 
+# Категории для материалов
+CATEGORIES = [
+    "Инструмент", "Сухие смеси", "Краски", "Сантехника", 
+    "Электрика", "Спецодежда", "Крепеж", "Гипсокартон", "Расходники", "Разное"
+]
+
+# ==========================================
+# 2. НАСТРОЙКА СТРАНИЦЫ
+# ==========================================
+st.set_page_config(page_title="Учет Стройки", page_icon="🏗️", layout="wide")
 genai.configure(api_key=API_KEY)
 
+# Скрываем меню разработчика и футер Streamlit для красоты
+hide_menu_style = """
+        <style>
+        #MainMenu {visibility: hidden;}
+        footer {visibility: hidden;}
+        header {visibility: hidden;}
+        </style>
+        """
+st.markdown(hide_menu_style, unsafe_allow_html=True)
+
 # ==========================================
-# 2. ФУНКЦИИ
+# 3. ФУНКЦИИ (МОЗГИ ПРОГРАММЫ)
 # ==========================================
+
 def get_best_model():
-    """Ищет рабочую модель"""
-    try:
-        models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
-        for m in models:
-            if 'flash' in m and 'lite' not in m: return m
-        for m in models:
-            if 'flash' in m: return m
-        return models[0]
-    except: return "models/gemini-1.5-flash"
+    """Выбирает самую быструю и дешевую модель Gemini"""
+    return "models/gemini-1.5-flash"
 
 def process_invoice(uploaded_file):
-    """Распознаем товары И ДАТУ накладной"""
+    """Отправляет фото в ИИ и получает список товаров"""
+    # Сохраняем файл временно
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
     tfile.write(uploaded_file.getvalue())
     tfile.close()
     
     myfile = genai.upload_file(tfile.name)
-    while myfile.state.name == "PROCESSING":
-        time.sleep(1)
-        myfile = genai.get_file(myfile.name)
+    
+    # Ждем пока Гугл обработает файл
+    with st.status("🧠 Искусственный интеллект думает...", expanded=True) as status:
+        while myfile.state.name == "PROCESSING":
+            time.sleep(1)
+            myfile = genai.get_file(myfile.name)
+        
+        status.write("✅ Фото обработано, читаем текст...")
+        model = genai.GenerativeModel(get_best_model())
+        
+        # Инструкция для ИИ
+        prompt = f"""
+        Ты помощник прораба. Посмотри на этот чек/накладную.
+        1. Найди ДАТУ документа. Если не нашел - используй сегодняшнюю. Формат: DD.MM.YYYY
+        2. Выпиши все купленные позиции.
+        3. Для каждой позиции определи категорию из списка: {CATEGORIES}
+        
+        Верни ТОЛЬКО чистый JSON (без слова json и кавычек ```):
+        {{
+            "invoice_date": "DD.MM.YYYY",
+            "items": [
+                {{
+                    "name": "Название товара (коротко и ясно)",
+                    "quantity": 1.0,
+                    "unit": "шт/кг/м/упак",
+                    "price": 100.0,
+                    "total": 100.0,
+                    "category": "Категория из списка"
+                }}
+            ]
+        }}
+        """
+        
+        try:
+            response = model.generate_content([myfile, prompt])
+            genai.delete_file(myfile.name) # Удаляем файл с серверов Гугла
+            
+            # Чистим ответ от лишнего мусора
+            text = response.text.replace("```json", "").replace("```", "").strip()
+            return json.loads(text)
+        except Exception as e:
+            st.error(f"Ошибка при чтении: {e}")
+            return None
 
-    model = genai.GenerativeModel(get_best_model())
-    
-    # Промпт теперь просит найти дату документа
-    prompt = """
-    Analyze this invoice.
-    1. Extract the **Invoice Date** (Дата документа). Format: DD.MM.YYYY. If not found, use today's date.
-    2. Extract items to JSON list.
-    
-    Output format: JSON object with two keys:
-    {
-        "invoice_date": "DD.MM.YYYY",
-        "items": [
-            {
-                "name": "Item Name (Russian)",
-                "quantity": 1.0,
-                "unit": "шт",
-                "price": 100.0,
-                "total": 100.0,
-                "category": "Choose from: [Инструмент, Сухие смеси, Краски, Сантехника, Электрика, Спецодежда, Крепеж, Гипсокартон, Разное]"
-            }
-        ]
-    }
-    Return ONLY valid JSON.
-    """
-    
+def save_to_google_sheets(df):
+    """Записывает данные в таблицу"""
     try:
-        response = model.generate_content([myfile, prompt])
-        genai.delete_file(myfile.name)
-        text = response.text.replace("```json", "").replace("```", "").strip()
-        return json.loads(text)
-    except Exception as e:
-        st.error(f"Ошибка AI: {e}")
-        return None
+        scope = ['[https://spreadsheets.google.com/feeds](https://spreadsheets.google.com/feeds)', '[https://www.googleapis.com/auth/drive](https://www.googleapis.com/auth/drive)']
+        
+        # Проверяем, где лежит ключ (в секретах Streamlit или в файле)
+        if os.path.exists('service_account.json'):
+            creds = ServiceAccountCredentials.from_json_keyfile_name('service_account.json', scope)
+        else:
+            st.error("❌ Не найден файл ключа service_account.json!")
+            return False
 
-def save_to_sheet_sorted(df):
-    """Пишет данные на РАЗНЫЕ листы и сортирует их"""
-    try:
-        scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
-        creds = ServiceAccountCredentials.from_json_keyfile_name(JSON_FILE, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open(SHEET_NAME)
         
-        # Группируем данные по Объектам (чтобы писать пачками)
-        # Например: 3 строки на "Офис", 2 строки на "Склад"
+        # Группируем по объектам (чтобы не открывать лист 100 раз)
         for obj_name, group in df.groupby("object"):
-            
-            # 1. Пытаемся открыть лист с именем объекта. Если нет - создаем.
             try:
                 worksheet = spreadsheet.worksheet(obj_name)
             except:
-                worksheet = spreadsheet.add_worksheet(title=obj_name, rows=100, cols=10)
-                # Создаем заголовки для нового листа
+                # Если листа нет - создаем новый
+                worksheet = spreadsheet.add_worksheet(title=obj_name, rows=1000, cols=10)
                 worksheet.append_row(["Дата", "Название", "Кол-во", "Ед.", "Цена", "Сумма", "Категория"])
                 worksheet.format('A1:G1', {'textFormat': {'bold': True}})
 
-            # 2. Готовим данные
-            data_rows = []
+            # Готовим строки для записи
+            rows_to_add = []
             for _, row in group.iterrows():
-                # Конвертируем дату в формат Гугл Таблиц, чтобы сортировка работала корректно
-                data_rows.append([
-                    row['date'], # Дата из чека
+                rows_to_add.append([
+                    row['date'],
                     row['name'],
                     row['quantity'],
                     row['unit'],
@@ -114,75 +141,77 @@ def save_to_sheet_sorted(df):
                     row['category']
                 ])
             
-            # 3. Записываем
-            worksheet.append_rows(data_rows)
+            # Добавляем в конец таблицы
+            worksheet.append_rows(rows_to_add)
             
-            # 4. СОРТИРОВКА (По колонке А - Дата)
-            # sort_range требует указать диапазон. Берем с A2 (без заголовка) до G1000
-            # Сортируем по 1-й колонке (Дата), ascending=True (от старых к новым)
-            last_row = len(worksheet.get_all_values())
-            if last_row > 1:
-                worksheet.sort((1, 'asc'), range=f'A2:G{last_row}')
-                
         return True
     except Exception as e:
-        st.error(f"Ошибка записи: {e}")
+        st.error(f"❌ Ошибка записи в таблицу: {e}")
+        st.info("💡 Проверь: 1. Название таблицы верное? 2. Обновил ли ты service_account.json?")
         return False
 
 # ==========================================
-# 3. ИНТЕРФЕЙС
+# 4. ИНТЕРФЕЙС
 # ==========================================
-st.set_page_config(page_title="Scanner Pro", page_icon="🏗️")
-st.title("🏗️ Учет 2.0: Объекты и Даты")
+st.title("🏗️ Сканер Накладных")
+st.write("Загрузи фото чека, проверь цены и нажми кнопку сохранить.")
 
-upl = st.file_uploader("Загрузи фото", type=['jpg', 'png', 'jpeg'])
+col1, col2 = st.columns([1, 2])
 
-if upl and st.button("🚀 РАСПОЗНАТЬ"):
-    with st.spinner("Ищу дату и товары..."):
-        result = process_invoice(upl)
+with col1:
+    st.subheader("1. Загрузка")
+    upl = st.file_uploader("📸 Сделай фото или выбери файл", type=['jpg', 'png', 'jpeg'])
+    
+    if upl:
+        st.image(upl, caption="Твое фото", use_container_width=True)
+        if st.button("🚀 РАСПОЗНАТЬ ЧЕК", type="primary", use_container_width=True):
+            res = process_invoice(upl)
+            if res:
+                df = pd.DataFrame(res['items'])
+                df['date'] = res.get('invoice_date', datetime.now().strftime("%d.%m.%Y"))
+                df['object'] = OBJECTS[0] # Выбираем первый объект по умолчанию
+                st.session_state['df'] = df
+                st.rerun()
+
+with col2:
+    if 'df' in st.session_state:
+        st.subheader("2. Проверка данных")
         
-        if result and 'items' in result:
-            items = result['items']
-            inv_date = result.get('invoice_date', datetime.now().strftime("%d.%m.%Y"))
-            
-            df = pd.DataFrame(items)
-            
-            # Чистим от услуг
-            stop_words = ['доставка', 'перевозка', 'услуга', 'разгрузка']
-            df = df[~df['name'].str.contains('|'.join(stop_words), case=False, na=False)]
-            
-            # Добавляем колонки для редактора
-            df['object'] = OBJECTS[0]
-            df['date'] = inv_date # Ставим найденную дату
-            
-            st.session_state['df'] = df
-        else:
-            st.error("Не удалось прочитать накладную.")
+        # Редактор таблицы
+        edited_df = st.data_editor(
+            st.session_state['df'],
+            num_rows="dynamic",
+            use_container_width=True,
+            height=600,
+            column_config={
+                "date": st.column_config.TextColumn("📅 Дата"),
+                "name": st.column_config.TextColumn("📦 Название", width="large"),
+                "quantity": st.column_config.NumberColumn("Кол-во"),
+                "unit": st.column_config.TextColumn("Ед."),
+                "price": st.column_config.NumberColumn("Цена ₽", format="%.2f ₽"),
+                "total": st.column_config.NumberColumn("Сумма ₽", format="%.2f ₽"),
+                "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES, required=True),
+                "object": st.column_config.SelectboxColumn("🏠 ОБЪЕКТ (Куда записать?)", options=OBJECTS, required=True),
+            }
+        )
 
-if 'df' in st.session_state:
-    st.info("💡 Проверь дату и распредели по объектам. Программа сама создаст нужные листы.")
-    
-    # Настройка редактора
-    edited = st.data_editor(
-        st.session_state['df'],
-        num_rows="dynamic",
-        use_container_width=True,
-        column_config={
-            "date": st.column_config.TextColumn("Дата документа 📅"),
-            "name": st.column_config.TextColumn("Название", width="medium"),
-            "category": st.column_config.SelectboxColumn("Категория", options=[
-                "Инструмент", "Сухие смеси", "Краски", "Сантехника", "Электрика", "Спецодежда", "Крепеж", "Гипсокартон", "Разное"
-            ]),
-            "object": st.column_config.SelectboxColumn("👉 ЛИСТ (ОБЪЕКТ)", options=OBJECTS, required=True),
-            "price": st.column_config.NumberColumn("Цена"),
-            "total": st.column_config.NumberColumn("Сумма"),
-        }
-    )
-    
-    if st.button("💾 РАЗНЕСТИ ПО ЛИСТАМ"):
-        with st.spinner("Создаю листы и сортирую по датам..."):
-            if save_to_sheet_sorted(edited):
-                st.success("✅ Готово! Данные разнесены по вкладкам и отсортированы.")
-                time.sleep(2)
+        st.divider()
+        
+        # Большая кнопка сохранения
+        btn_col1, btn_col2 = st.columns([3, 1])
+        with btn_col1:
+            if st.button("💾 ЗАПИСАТЬ В GOOGLE ТАБЛИЦУ", type="primary", use_container_width=True):
+                with st.spinner("Записываем..."):
+                    if save_to_google_sheets(edited_df):
+                        st.balloons()
+                        st.success(f"✅ Успешно добавлено {len(edited_df)} позиций!")
+                        time.sleep(3)
+                        del st.session_state['df']
+                        st.rerun()
+        with btn_col2:
+            if st.button("❌ Сброс"):
                 del st.session_state['df']
                 st.rerun()
+
+    else:
+        st.info("👈 Загрузи фото слева, чтобы начать работу.")
