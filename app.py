@@ -54,43 +54,63 @@ def get_existing_objects():
     except:
         return ["Склад"]
 
-def format_google_sheet(ws):
-    """Рисует сетку и РАСТЯГИВАЕТ колонку с названием"""
+def format_and_sort_sheet(ws):
+    """
+    1. Рисует сетку.
+    2. Растягивает колонку Названия.
+    3. СОРТИРУЕТ таблицу: сначала по Категории (G), потом по Названию (B).
+    """
     try:
         # Жирный заголовок
         ws.format('A1:G1', {'textFormat': {'bold': True}})
         
+        # Получаем ID листа
+        sheet_id = ws.id
+        
         body = {
             "requests": [
-                # 1. Рисуем границы (сетку)
+                # 1. Рисуем сетку
                 {
                     "updateBorders": {
-                        "range": {"sheetId": ws.id, "startRowIndex": 0, "startColumnIndex": 0, "endColumnIndex": 7},
+                        "range": {"sheetId": sheet_id, "startRowIndex": 0, "startColumnIndex": 0, "endColumnIndex": 7},
                         "top": {"style": "SOLID", "width": 1}, "bottom": {"style": "SOLID", "width": 1},
                         "left": {"style": "SOLID", "width": 1}, "right": {"style": "SOLID", "width": 1},
                         "innerHorizontal": {"style": "SOLID", "width": 1}, "innerVertical": {"style": "SOLID", "width": 1},
                     }
                 },
-                # 2. РАСТЯГИВАЕМ КОЛОНКУ "B" (Название) до 400 пикселей
+                # 2. Растягиваем колонку B (Название)
                 {
                     "updateDimensionProperties": {
-                        "range": {
-                            "sheetId": ws.id,
-                            "dimension": "COLUMNS",
-                            "startIndex": 1, # Колонка B (индекс 1)
-                            "endIndex": 2
-                        },
-                        "properties": {
-                            "pixelSize": 400 # <-- ШИРИНА КОЛОНКИ
-                        },
+                        "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
+                        "properties": {"pixelSize": 400},
                         "fields": "pixelSize"
+                    }
+                },
+                # 3. СОРТИРОВКА (САМОЕ ВАЖНОЕ)
+                {
+                    "sortRange": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1, # Пропускаем заголовок (строка 1)
+                            # Сортируем до конца (или 1000 строк)
+                        },
+                        "sortSpecs": [
+                            {
+                                "dimensionIndex": 6, # Сначала по КАТЕГОРИИ (Колонка G, индекс 6)
+                                "sortOrder": "ASCENDING" 
+                            },
+                            {
+                                "dimensionIndex": 1, # Потом по НАЗВАНИЮ (Колонка B, индекс 1)
+                                "sortOrder": "ASCENDING"
+                            }
+                        ]
                     }
                 }
             ]
         }
         ws.spreadsheet.batch_update(body)
     except Exception as e:
-        print(f"Ошибка форматирования: {e}")
+        print(f"Ошибка сортировки/форматирования: {e}")
 
 def process_invoice(uploaded_file):
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
@@ -130,7 +150,7 @@ def process_invoice(uploaded_file):
             return None
 
 def save_and_update(df_full, target_obj):
-    """Сохраняет, обновляет остатки и форматирует"""
+    """Сохраняет и запускает сортировку"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_dict, scope)
@@ -179,8 +199,8 @@ def save_and_update(df_full, target_obj):
         
         if rows_to_append:
             ws.append_rows(rows_to_append)
-            # ФОРМАТИРОВАНИЕ
-            format_google_sheet(ws)
+            # ВЫЗЫВАЕМ СОРТИРОВКУ И КРАСОТУ
+            format_and_sort_sheet(ws)
         
         new_df = new_df.drop(index=indices_to_drop).reset_index(drop=True)
         return True, new_df
@@ -245,7 +265,6 @@ with col_right:
             st.session_state['df']['select'] = False
             st.rerun()
 
-        # ИСПРАВЛЕНИЕ: ДОБАВЛЕН KEY="EDITOR_TABLE" ЧТОБЫ УБРАТЬ ГЛЮК С ГАЛОЧКОЙ
         edited_df = st.data_editor(
             st.session_state['df'],
             num_rows="dynamic",
@@ -260,10 +279,9 @@ with col_right:
                 "unit": st.column_config.TextColumn("Ед.", width="small"),
                 "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES, width="medium"),
             },
-            key="editor_table" # <-- ВОТ ЭТО ЛЕЧИТ ПЕРЕЗАГРУЗКУ
+            key="editor_table"
         )
         
-        # Обновляем состояние
         st.session_state['df'] = edited_df
         
         st.markdown("---")
