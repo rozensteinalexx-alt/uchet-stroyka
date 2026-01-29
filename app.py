@@ -60,7 +60,7 @@ def process_invoice(uploaded_file):
             myfile = genai.get_file(myfile.name)
         
         status.write("✅ Фото обработано, извлекаем позиции...")
-        model = genai.GenerativeModel("gemini-1.5-flash")
+       model = genai.GenerativeModel("gemini-1.5-pro")
         
         prompt = f"""
         Ты профессиональный сметчик. Твоя задача - перенести данные из чека в JSON.
@@ -195,3 +195,4 @@ with col2:
                 time.sleep(2)
                 del st.session_state['df']
                 st.rerun()
+
