@@ -55,21 +55,12 @@ def get_existing_objects():
         return ["Склад"]
 
 def format_and_sort_sheet(ws):
-    """
-    1. Рисует сетку.
-    2. Растягивает колонку Названия.
-    3. СОРТИРУЕТ таблицу: сначала по Категории (G), потом по Названию (B).
-    """
+    """Рисует сетку, растягивает колонку и сортирует"""
     try:
-        # Жирный заголовок
         ws.format('A1:G1', {'textFormat': {'bold': True}})
-        
-        # Получаем ID листа
         sheet_id = ws.id
-        
         body = {
             "requests": [
-                # 1. Рисуем сетку
                 {
                     "updateBorders": {
                         "range": {"sheetId": sheet_id, "startRowIndex": 0, "startColumnIndex": 0, "endColumnIndex": 7},
@@ -78,7 +69,6 @@ def format_and_sort_sheet(ws):
                         "innerHorizontal": {"style": "SOLID", "width": 1}, "innerVertical": {"style": "SOLID", "width": 1},
                     }
                 },
-                # 2. Растягиваем колонку B (Название)
                 {
                     "updateDimensionProperties": {
                         "range": {"sheetId": sheet_id, "dimension": "COLUMNS", "startIndex": 1, "endIndex": 2},
@@ -86,23 +76,12 @@ def format_and_sort_sheet(ws):
                         "fields": "pixelSize"
                     }
                 },
-                # 3. СОРТИРОВКА (САМОЕ ВАЖНОЕ)
                 {
                     "sortRange": {
-                        "range": {
-                            "sheetId": sheet_id,
-                            "startRowIndex": 1, # Пропускаем заголовок (строка 1)
-                            # Сортируем до конца (или 1000 строк)
-                        },
+                        "range": {"sheetId": sheet_id, "startRowIndex": 1},
                         "sortSpecs": [
-                            {
-                                "dimensionIndex": 6, # Сначала по КАТЕГОРИИ (Колонка G, индекс 6)
-                                "sortOrder": "ASCENDING" 
-                            },
-                            {
-                                "dimensionIndex": 1, # Потом по НАЗВАНИЮ (Колонка B, индекс 1)
-                                "sortOrder": "ASCENDING"
-                            }
+                            {"dimensionIndex": 6, "sortOrder": "ASCENDING"}, # По Категории
+                            {"dimensionIndex": 1, "sortOrder": "ASCENDING"}  # По Названию
                         ]
                     }
                 }
@@ -110,7 +89,7 @@ def format_and_sort_sheet(ws):
         }
         ws.spreadsheet.batch_update(body)
     except Exception as e:
-        print(f"Ошибка сортировки/форматирования: {e}")
+        print(f"Ошибка сортировки: {e}")
 
 def process_invoice(uploaded_file):
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
@@ -150,7 +129,7 @@ def process_invoice(uploaded_file):
             return None
 
 def save_and_update(df_full, target_obj):
-    """Сохраняет и запускает сортировку"""
+    """Сохраняет, сортирует и обновляет"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_dict, scope)
@@ -199,7 +178,6 @@ def save_and_update(df_full, target_obj):
         
         if rows_to_append:
             ws.append_rows(rows_to_append)
-            # ВЫЗЫВАЕМ СОРТИРОВКУ И КРАСОТУ
             format_and_sort_sheet(ws)
         
         new_df = new_df.drop(index=indices_to_drop).reset_index(drop=True)
@@ -223,7 +201,6 @@ if 'df' not in st.session_state:
 # ==========================================
 st.title("🏗️ Учет Материалов")
 
-# --- БЛОК 1: Объекты ---
 with st.expander("➕ Создать новый объект"):
     c1, c2 = st.columns([3, 1])
     new_obj = c1.text_input("Название")
@@ -241,15 +218,19 @@ with col_left:
     st.subheader("1. Загрузка")
     upl = st.file_uploader("Фото накладной", type=['jpg', 'png', 'jpeg'])
     
-    if upl and st.button("🚀 РАСПОЗНАТЬ", type="primary", use_container_width=True):
-        res = process_invoice(upl)
-        if res:
-            df = pd.DataFrame(res['items'])
-            df['date'] = res.get('invoice_date', datetime.now().strftime("%d.%m.%Y"))
-            df.insert(0, "select", False) 
-            df['send_qty'] = df['quantity'] 
-            st.session_state['df'] = df
-            st.rerun()
+    # КНОПКА ВИДНА ВСЕГДА, НО СЕРАЯ, ЕСЛИ ФАЙЛА НЕТ
+    btn_disabled = (upl is None)
+    
+    if st.button("🚀 РАСПОЗНАТЬ", type="primary", use_container_width=True, disabled=btn_disabled):
+        if upl:
+            res = process_invoice(upl)
+            if res:
+                df = pd.DataFrame(res['items'])
+                df['date'] = res.get('invoice_date', datetime.now().strftime("%d.%m.%Y"))
+                df.insert(0, "select", False) 
+                df['send_qty'] = df['quantity'] 
+                st.session_state['df'] = df
+                st.rerun()
 
 # --- БЛОК 3: Таблица и Действия ---
 with col_right:
