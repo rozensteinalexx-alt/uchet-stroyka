@@ -29,40 +29,65 @@ CATEGORIES = [
 ]
 
 # ==========================================
-# 2. УМНЫЙ ПОИСК МОДЕЛИ
+# 2. ПОЛЕЗНЫЕ ФУНКЦИИ (ИИ, Таблицы, Красота)
 # ==========================================
+
 @st.cache_resource
 def get_working_model_name():
-    """Ищет рабочую модель Gemini"""
+    """Ищет рабочую модель (Flash или Pro)"""
     try:
         models = list(genai.list_models())
-        for m in models: # Ищем Flash (быстрая)
+        # Приоритет Flash (быстрее), потом Pro
+        for m in models:
             if 'generateContent' in m.supported_generation_methods and 'flash' in m.name:
                 return m.name
-        for m in models: # Ищем Pro (умная)
-            if 'generateContent' in m.supported_generation_methods and 'pro' in m.name:
-                return m.name
-        return "gemini-1.5-pro" # Заглушка
+        return "gemini-1.5-pro"
     except:
         return "gemini-1.5-pro"
 
 CURRENT_MODEL_NAME = get_working_model_name()
 
-# ==========================================
-# 3. ФУНКЦИИ
-# ==========================================
 def get_existing_objects():
-    """Получает список вкладок из таблицы"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_dict, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open(SHEET_NAME)
-        titles = [ws.title for ws in spreadsheet.worksheets()]
-        # Убираем служебные листы, если нужно
-        return titles
+        return [ws.title for ws in spreadsheet.worksheets()]
+    except:
+        return ["Склад"]
+
+def format_google_sheet(worksheet):
+    """Делает красиво: рисует границы и жирный заголовок"""
+    try:
+        # 1. Жирный заголовок
+        worksheet.format('A1:G1', {'textFormat': {'bold': True}})
+        
+        # 2. Рисуем сетку (границы) для всей таблицы
+        # Это немного магии через API, чтобы не ставить лишние библиотеки
+        body = {
+            "requests": [
+                {
+                    "updateBorders": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": 0,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": 7 # A-G (7 колонок)
+                        },
+                        "top": {"style": "SOLID", "width": 1},
+                        "bottom": {"style": "SOLID", "width": 1},
+                        "left": {"style": "SOLID", "width": 1},
+                        "right": {"style": "SOLID", "width": 1},
+                        "innerHorizontal": {"style": "SOLID", "width": 1},
+                        "innerVertical": {"style": "SOLID", "width": 1},
+                    }
+                }
+            ]
+        }
+        worksheet.spreadsheet.batch_update(body)
     except Exception as e:
-        return ["Создай объект"]
+        print(f"Не удалось навести красоту: {e}")
 
 def process_invoice(uploaded_file):
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
@@ -71,25 +96,28 @@ def process_invoice(uploaded_file):
     
     myfile = genai.upload_file(tfile.name)
     
-    with st.status(f"🧠 Читаем чек ({CURRENT_MODEL_NAME})...", expanded=True) as status:
+    with st.status(f"🧠 ИИ читает чек ({CURRENT_MODEL_NAME})...", expanded=True) as status:
         while myfile.state.name == "PROCESSING":
             time.sleep(1)
             myfile = genai.get_file(myfile.name)
         
-        status.write("✅ Разбираем товары...")
+        status.write("✅ Разбираем товары на русском...")
         model = genai.GenerativeModel(CURRENT_MODEL_NAME)
         
+        # ОБНОВЛЕННЫЙ ЗАПРОС: ПРОСИМ РУССКИЕ ЕДИНИЦЫ
         prompt = f"""
-        Extract items from invoice to JSON.
-        1. Date (DD.MM.YYYY)
-        2. Items
-        3. Category from: {CATEGORIES}
+        Роль: Прораб. Задача: Извлечь данные из чека в JSON.
         
-        JSON structure:
+        Правила:
+        1. Дата в формате DD.MM.YYYY.
+        2. Единицы измерения (unit) строго на русском: "шт", "уп", "м", "кг", "пара", "компл".
+        3. Категория из списка: {CATEGORIES}
+        
+        Верни JSON:
         {{
             "invoice_date": "DD.MM.YYYY",
             "items": [
-                {{ "name": "Item Name", "quantity": 1.0, "unit": "pcs", "price": 100.0, "total": 100.0, "category": "..." }}
+                {{ "name": "Название товара", "quantity": 1.0, "unit": "шт", "price": 100.0, "total": 100.0, "category": "..." }}
             ]
         }}
         """
@@ -102,88 +130,74 @@ def process_invoice(uploaded_file):
             st.error(f"Ошибка ИИ: {e}")
             return None
 
-def save_rows_to_sheets(df_to_save):
-    """Сохраняет только переданные строки"""
+def save_rows_to_sheets(df_to_save, target_object):
+    """Сохраняет строки в конкретный объект"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_dict, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open(SHEET_NAME)
         
-        # Группируем по объектам и сохраняем
-        for obj_name, group in df_to_save.groupby("object"):
-            # Пропускаем, если объект не выбран
-            if not obj_name or obj_name == "Выбери объект...":
-                continue
-                
-            try:
-                ws = spreadsheet.worksheet(obj_name)
-            except:
-                ws = spreadsheet.add_worksheet(title=obj_name, rows=1000, cols=10)
-                ws.append_row(["Дата", "Название", "Кол-во", "Ед.", "Цена", "Сумма", "Категория"])
-            
-            rows = []
-            for _, row in group.iterrows():
-                rows.append([row['date'], row['name'], row['quantity'], row['unit'], row['price'], row['total'], row['category']])
-            ws.append_rows(rows)
-            
+        try:
+            ws = spreadsheet.worksheet(target_object)
+        except:
+            ws = spreadsheet.add_worksheet(title=target_object, rows=1000, cols=10)
+            ws.append_row(["Дата", "Название", "Кол-во", "Ед.", "Цена", "Сумма", "Категория"])
+        
+        rows = []
+        for _, row in df_to_save.iterrows():
+            rows.append([
+                row['date'], row['name'], row['quantity'], row['unit'], 
+                row['price'], row['total'], row['category']
+            ])
+        
+        ws.append_rows(rows)
+        
+        # Наводим красоту (сетку) после записи
+        format_google_sheet(ws)
+        
         return True
     except Exception as e:
         st.error(f"Ошибка записи: {e}")
         return False
 
 # ==========================================
-# 4. ИНИЦИАЛИЗАЦИЯ
+# 3. ИНИЦИАЛИЗАЦИЯ
 # ==========================================
 if 'object_list' not in st.session_state:
     st.session_state['object_list'] = get_existing_objects()
 
-# Если объектов нет вообще
-if not st.session_state['object_list']:
-    st.session_state['object_list'] = ["Склад"]
-
 # ==========================================
-# 5. ИНТЕРФЕЙС
+# 4. ИНТЕРФЕЙС
 # ==========================================
 st.title("🏗️ Учет Материалов")
 
-# --- ВЕРХНЕЕ МЕНЮ: Управление объектами ---
-with st.expander("⚙️ Управление объектами (Создать / Выбрать)", expanded=True):
-    c1, c2, c3 = st.columns([2, 2, 1])
-    
-    # 1. Добавить новый
-    new_obj = c1.text_input("Создать новый объект:", placeholder="Например: ЖК Ленина")
-    if c1.button("➕ Создать"):
+# --- Блок создания нового объекта ---
+with st.expander("➕ Создать новый объект", expanded=False):
+    c1, c2 = st.columns([3, 1])
+    new_obj = c1.text_input("Название", placeholder="Например: ЖК Ленина")
+    if c2.button("Добавить"):
         if new_obj and new_obj not in st.session_state['object_list']:
             st.session_state['object_list'].append(new_obj)
             st.success(f"Объект '{new_obj}' создан!")
-            st.rerun()
-            
-    # 2. Массовый выбор
-    bulk_obj = c2.selectbox("Назначить один объект для ВСЕХ позиций:", ["-"] + st.session_state['object_list'])
-    if c2.button("Применить ко всем"):
-        if 'df' in st.session_state and bulk_obj != "-":
-            st.session_state['df']['object'] = bulk_obj
+            time.sleep(1)
             st.rerun()
 
 st.divider()
 
-# --- ОСНОВНАЯ ЗОНА ---
-col_left, col_right = st.columns([1, 3])
+col_left, col_right = st.columns([1, 2]) # Левая колонка уже, правая шире
 
 with col_left:
-    st.subheader("1. Загрузка")
-    upl = st.file_uploader("Фото чека", type=['jpg', 'png', 'jpeg'])
-    if upl and st.button("🚀 РАСПОЗНАТЬ"):
+    st.subheader("1. Чек")
+    upl = st.file_uploader("Загрузить фото", type=['jpg', 'png', 'jpeg'])
+    
+    if upl and st.button("🚀 РАСПОЗНАТЬ", type="primary", use_container_width=True):
         res = process_invoice(upl)
         if res:
             df = pd.DataFrame(res['items'])
             df['date'] = res.get('invoice_date', datetime.now().strftime("%d.%m.%Y"))
-            # Добавляем колонку для галочки (выбор)
+            # Добавляем галочку для выбора
             df.insert(0, "✅", False)
-            # Колонку объекта оставляем пустой или ставим дефолт
-            df['object'] = bulk_obj if bulk_obj != "-" else "Выбери объект..."
-            
             st.session_state['df'] = df
             st.rerun()
 
@@ -192,64 +206,64 @@ with col_right:
     
     if 'df' in st.session_state and not st.session_state['df'].empty:
         
-        # Редактор таблицы
+        # --- ТАБЛИЦА (КОМПАКТНАЯ) ---
+        # Мы скрываем 'price' и 'total' с экрана, но они остаются в памяти
         edited_df = st.data_editor(
             st.session_state['df'],
             num_rows="dynamic",
             use_container_width=True,
             height=400,
+            column_order=("✅", "name", "quantity", "unit", "category", "date"), # <-- ПОРЯДОК И СПИСОК КОЛОНОК НА ЭКРАНЕ
             column_config={
-                "✅": st.column_config.CheckboxColumn("Выбрать", width="small"),
-                "date": st.column_config.TextColumn("Дата", width="small"),
+                "✅": st.column_config.CheckboxColumn("Выбор", width="small"),
                 "name": st.column_config.TextColumn("Название", width="large"),
                 "quantity": st.column_config.NumberColumn("Кол-во", width="small"),
-                "price": st.column_config.NumberColumn("Цена", format="%.0f ₽"),
-                "total": st.column_config.NumberColumn("Сумма", format="%.0f ₽"),
-                "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES),
-                "object": st.column_config.SelectboxColumn("🏠 Куда отправить?", options=st.session_state['object_list'], required=True),
+                "unit": st.column_config.TextColumn("Ед.", width="small"),
+                "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES, width="medium"),
+                "date": st.column_config.TextColumn("Дата", width="small"),
             }
         )
-        
-        # Обновляем состояние (чтобы запомнить галочки и изменения)
         st.session_state['df'] = edited_df
         
-        # --- КНОПКИ ДЕЙСТВИЙ ---
-        b1, b2, b3 = st.columns(3)
+        st.markdown("---")
         
-        # Кнопка СПЛИТ (Дублирование)
-        if b1.button("📑 Копировать выбранные"):
-            # Берем строки, где стоит галочка
-            selected_rows = edited_df[edited_df["✅"] == True]
-            if not selected_rows.empty:
-                # Дублируем их и добавляем в конец
-                st.session_state['df'] = pd.concat([edited_df, selected_rows], ignore_index=True)
-                st.rerun()
-            else:
-                st.warning("Сначала поставь галочку ✅ у товара, который хочешь разделить!")
-
-        # Кнопка ОТПРАВИТЬ (Записать и Удалить)
-        if b3.button("🚀 ОТПРАВИТЬ ВЫБРАННЫЕ", type="primary"):
-            # Берем выбранные строки
+        # --- ПАНЕЛЬ УПРАВЛЕНИЯ (Снизу) ---
+        st.write("👇 **Куда отправить выбранные галочкой позиции?**")
+        
+        action_col1, action_col2, action_col3 = st.columns([2, 1, 1])
+        
+        # 1. Выбор объекта
+        target_obj = action_col1.selectbox("Выберите объект:", options=st.session_state['object_list'], label_visibility="collapsed")
+        
+        # 2. Кнопка Отправить
+        if action_col2.button("🚀 ОТПРАВИТЬ", type="primary", use_container_width=True):
+            # Берем только выбранные
             rows_to_send = edited_df[edited_df["✅"] == True]
             
             if rows_to_send.empty:
-                st.warning("Ничего не выбрано! Поставь галочки ✅.")
+                st.warning("Сначала поставьте галочки ✅!")
             else:
-                # Проверка: выбран ли объект
-                if "Выбери объект..." in rows_to_send['object'].values:
-                    st.error("⚠️ У одной из позиций не выбран Обьект! Укажи куда везти.")
-                else:
-                    if save_rows_to_sheets(rows_to_send):
-                        st.success(f"✅ Уехало позиций: {len(rows_to_send)}")
-                        # УДАЛЯЕМ ОТПРАВЛЕННЫЕ ИЗ ТАБЛИЦЫ
-                        st.session_state['df'] = edited_df[edited_df["✅"] == False].reset_index(drop=True)
-                        time.sleep(1)
-                        st.rerun()
+                # Отправляем в Google Sheets
+                if save_rows_to_sheets(rows_to_send, target_obj):
+                    st.success(f"Уехало {len(rows_to_send)} поз. на '{target_obj}'")
+                    # Удаляем отправленные из списка на экране
+                    st.session_state['df'] = edited_df[edited_df["✅"] == False].reset_index(drop=True)
+                    time.sleep(1)
+                    st.rerun()
+        
+        # 3. Кнопка Разделить (Дубль)
+        if action_col3.button("📑 Копия", help="Дублировать строку, чтобы разбить кол-во"):
+            selected = edited_df[edited_df["✅"] == True]
+            if not selected.empty:
+                st.session_state['df'] = pd.concat([edited_df, selected], ignore_index=True)
+                st.rerun()
+            else:
+                st.warning("Выберите строку галочкой")
 
-    elif 'df' in st.session_state and st.session_state['df'].empty:
-        st.info("🎉 Список пуст! Все чеки обработаны.")
-        if st.button("Начать заново"):
+    elif 'df' in st.session_state:
+        st.success("🎉 Чек полностью обработан!")
+        if st.button("Загрузить новый"):
             del st.session_state['df']
             st.rerun()
     else:
-        st.info("👈 Загрузи чек слева.")
+        st.info("👈 Загрузи фото слева")
