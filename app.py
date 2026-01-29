@@ -130,7 +130,7 @@ def process_invoice(uploaded_file):
             return None
 
 def save_and_update(df_full, target_obj):
-    """Сохраняет выбранные строки, обновляет остатки и форматирует таблицу"""
+    """Сохраняет, обновляет остатки и форматирует"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_dict, scope)
@@ -179,7 +179,7 @@ def save_and_update(df_full, target_obj):
         
         if rows_to_append:
             ws.append_rows(rows_to_append)
-            # ВЫЗЫВАЕМ ФУНКЦИЮ КРАСОТЫ ПОСЛЕ ЗАПИСИ
+            # ФОРМАТИРОВАНИЕ
             format_google_sheet(ws)
         
         new_df = new_df.drop(index=indices_to_drop).reset_index(drop=True)
@@ -245,6 +245,7 @@ with col_right:
             st.session_state['df']['select'] = False
             st.rerun()
 
+        # ИСПРАВЛЕНИЕ: ДОБАВЛЕН KEY="EDITOR_TABLE" ЧТОБЫ УБРАТЬ ГЛЮК С ГАЛОЧКОЙ
         edited_df = st.data_editor(
             st.session_state['df'],
             num_rows="dynamic",
@@ -258,9 +259,11 @@ with col_right:
                 "send_qty": st.column_config.NumberColumn("📤 Отправить", min_value=0.01, step=1.0, format="%.1f"),
                 "unit": st.column_config.TextColumn("Ед.", width="small"),
                 "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES, width="medium"),
-            }
+            },
+            key="editor_table" # <-- ВОТ ЭТО ЛЕЧИТ ПЕРЕЗАГРУЗКУ
         )
         
+        # Обновляем состояние
         st.session_state['df'] = edited_df
         
         st.markdown("---")
