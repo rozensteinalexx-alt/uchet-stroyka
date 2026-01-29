@@ -55,20 +55,42 @@ def get_existing_objects():
         return ["Склад"]
 
 def format_google_sheet(ws):
-    """Рисует сетку в таблице"""
+    """Рисует сетку и РАСТЯГИВАЕТ колонку с названием"""
     try:
+        # Жирный заголовок
         ws.format('A1:G1', {'textFormat': {'bold': True}})
+        
         body = {
-            "requests": [{"updateBorders": {
-                "range": {"sheetId": ws.id, "startRowIndex": 0, "startColumnIndex": 0, "endColumnIndex": 7},
-                "top": {"style": "SOLID", "width": 1}, "bottom": {"style": "SOLID", "width": 1},
-                "left": {"style": "SOLID", "width": 1}, "right": {"style": "SOLID", "width": 1},
-                "innerHorizontal": {"style": "SOLID", "width": 1}, "innerVertical": {"style": "SOLID", "width": 1},
-            }}]
+            "requests": [
+                # 1. Рисуем границы (сетку)
+                {
+                    "updateBorders": {
+                        "range": {"sheetId": ws.id, "startRowIndex": 0, "startColumnIndex": 0, "endColumnIndex": 7},
+                        "top": {"style": "SOLID", "width": 1}, "bottom": {"style": "SOLID", "width": 1},
+                        "left": {"style": "SOLID", "width": 1}, "right": {"style": "SOLID", "width": 1},
+                        "innerHorizontal": {"style": "SOLID", "width": 1}, "innerVertical": {"style": "SOLID", "width": 1},
+                    }
+                },
+                # 2. РАСТЯГИВАЕМ КОЛОНКУ "B" (Название) до 400 пикселей
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": ws.id,
+                            "dimension": "COLUMNS",
+                            "startIndex": 1, # Колонка B (индекс 1)
+                            "endIndex": 2
+                        },
+                        "properties": {
+                            "pixelSize": 400 # <-- ШИРИНА КОЛОНКИ
+                        },
+                        "fields": "pixelSize"
+                    }
+                }
+            ]
         }
         ws.spreadsheet.batch_update(body)
-    except:
-        pass
+    except Exception as e:
+        print(f"Ошибка форматирования: {e}")
 
 def process_invoice(uploaded_file):
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix='.jpg')
@@ -86,8 +108,7 @@ def process_invoice(uploaded_file):
         model = genai.GenerativeModel(CURRENT_MODEL_NAME)
         
         prompt = f"""
-        Роль: Сметчик.
-        Задача: Извлечь данные из чека.
+        Роль: Сметчик. Задача: Извлечь данные из чека.
         Важно: Единицы измерения (unit) переводи на русский: "шт", "уп", "м", "кг", "компл".
         Категории: {CATEGORIES}
         
@@ -108,8 +129,8 @@ def process_invoice(uploaded_file):
             st.error(f"Ошибка: {e}")
             return None
 
-def save_single_row(row_data, target_obj, actual_qty):
-    """Сохраняет одну строку с указанным количеством"""
+def save_and_update(df_full, target_obj):
+    """Сохраняет выбранные строки, обновляет остатки и форматирует таблицу"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_dict, scope)
@@ -122,19 +143,51 @@ def save_single_row(row_data, target_obj, actual_qty):
             ws = spreadsheet.add_worksheet(title=target_obj, rows=1000, cols=10)
             ws.append_row(["Дата", "Название", "Кол-во", "Ед.", "Цена", "Сумма", "Категория"])
         
-        # Пересчитываем сумму пропорционально количеству
-        price_per_unit = row_data['price']
-        new_total = price_per_unit * actual_qty
+        rows_to_process = df_full[df_full['select'] == True]
         
-        ws.append_row([
-            row_data['date'], row_data['name'], actual_qty, row_data['unit'], 
-            row_data['price'], new_total, row_data['category']
-        ])
-        format_google_sheet(ws)
-        return True
+        new_df = df_full.copy()
+        indices_to_drop = []
+        rows_to_append = []
+        
+        for idx, row in rows_to_process.iterrows():
+            send_qty = row['send_qty']
+            actual_qty = row['quantity']
+            
+            if send_qty > actual_qty:
+                st.error(f"Ошибка! '{row['name']}': Нельзя отправить {send_qty}, когда на складе {actual_qty}.")
+                return False, df_full
+            
+            if send_qty <= 0:
+                continue 
+                
+            price_per_unit = row['price']
+            new_total = price_per_unit * send_qty
+            
+            rows_to_append.append([
+                row['date'], row['name'], send_qty, row['unit'], 
+                row['price'], new_total, row['category']
+            ])
+            
+            remainder = actual_qty - send_qty
+            
+            if remainder <= 0.001:
+                indices_to_drop.append(idx)
+            else:
+                new_df.at[idx, 'quantity'] = remainder 
+                new_df.at[idx, 'send_qty'] = remainder 
+                new_df.at[idx, 'select'] = False 
+        
+        if rows_to_append:
+            ws.append_rows(rows_to_append)
+            # ВЫЗЫВАЕМ ФУНКЦИЮ КРАСОТЫ ПОСЛЕ ЗАПИСИ
+            format_google_sheet(ws)
+        
+        new_df = new_df.drop(index=indices_to_drop).reset_index(drop=True)
+        return True, new_df
+        
     except Exception as e:
         st.error(f"Ошибка сохранения: {e}")
-        return False
+        return False, df_full
 
 # ==========================================
 # 3. ИНИЦИАЛИЗАЦИЯ
@@ -150,20 +203,20 @@ if 'df' not in st.session_state:
 # ==========================================
 st.title("🏗️ Учет Материалов")
 
-# --- БЛОК 1: Создание объекта ---
-with st.expander("➕ Новый объект"):
+# --- БЛОК 1: Объекты ---
+with st.expander("➕ Создать новый объект"):
     c1, c2 = st.columns([3, 1])
-    new_obj = c1.text_input("Имя объекта", placeholder="Например: ЖК Ленина")
-    if c2.button("Создать"):
+    new_obj = c1.text_input("Название")
+    if c2.button("Добавить"):
         if new_obj and new_obj not in st.session_state['object_list']:
             st.session_state['object_list'].append(new_obj)
             st.rerun()
 
 st.divider()
 
-col_left, col_right = st.columns([1, 2])
+col_left, col_right = st.columns([1, 3]) 
 
-# --- БЛОК 2: Загрузка чека ---
+# --- БЛОК 2: Загрузка ---
 with col_left:
     st.subheader("1. Загрузка")
     upl = st.file_uploader("Фото накладной", type=['jpg', 'png', 'jpeg'])
@@ -173,112 +226,67 @@ with col_left:
         if res:
             df = pd.DataFrame(res['items'])
             df['date'] = res.get('invoice_date', datetime.now().strftime("%d.%m.%Y"))
-            # Добавляем ID чтобы различать строки
-            df['id'] = range(1, len(df) + 1)
-            # Колонка выбора (галочка)
-            df.insert(0, "select", False)
+            df.insert(0, "select", False) 
+            df['send_qty'] = df['quantity'] 
             st.session_state['df'] = df
             st.rerun()
 
-# --- БЛОК 3: Работа с товарами ---
+# --- БЛОК 3: Таблица и Действия ---
 with col_right:
     st.subheader("2. Распределение")
     
     if not st.session_state['df'].empty:
         
-        # 1. ТАБЛИЦА (Редактируемая)
-        # Важно: используем key, чтобы состояние не слетало
+        bc1, bc2 = st.columns([1, 5])
+        if bc1.button("Выбрать все"):
+            st.session_state['df']['select'] = True
+            st.rerun()
+        if bc2.button("Снять все"):
+            st.session_state['df']['select'] = False
+            st.rerun()
+
         edited_df = st.data_editor(
             st.session_state['df'],
             num_rows="dynamic",
             use_container_width=True,
-            height=350,
-            column_order=("select", "name", "quantity", "unit", "category", "date"),
+            height=500,
+            column_order=("select", "name", "quantity", "send_qty", "unit", "category"), 
             column_config={
                 "select": st.column_config.CheckboxColumn("✅", width="small"),
                 "name": st.column_config.TextColumn("Название", width="large", disabled=True),
-                "quantity": st.column_config.NumberColumn("Остаток", width="small", disabled=True),
+                "quantity": st.column_config.NumberColumn("Склад", disabled=True, format="%.1f"),
+                "send_qty": st.column_config.NumberColumn("📤 Отправить", min_value=0.01, step=1.0, format="%.1f"),
                 "unit": st.column_config.TextColumn("Ед.", width="small"),
-                "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES),
-                "date": st.column_config.TextColumn("Дата", width="small"),
-            },
-            key="editor" 
+                "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES, width="medium"),
+            }
         )
         
-        # Обновляем сессию при изменении галочек, но аккуратно
-        # Мы используем это состояние для логики ниже
-        
-        # 2. АНАЛИЗ ВЫБОРА
-        selected_rows = edited_df[edited_df["select"] == True]
-        count_selected = len(selected_rows)
+        st.session_state['df'] = edited_df
         
         st.markdown("---")
         
-        # 3. ПАНЕЛЬ ДЕЙСТВИЙ (Умная)
-        if count_selected == 0:
-            st.info("👈 Выбери галочкой товар, который хочешь отправить.")
-            
-        elif count_selected == 1:
-            # --- РЕЖИМ "РАЗДЕЛИТЕЛЬ" (СЛАЙДЕР) ---
-            row = selected_rows.iloc[0] # Берем единственную выбранную строку
-            max_qty = float(row['quantity'])
-            
-            st.write(f"📦 **{row['name']}** (Всего: {max_qty} {row['unit']})")
-            
-            act_col1, act_col2, act_col3 = st.columns([1, 2, 1])
-            
-            # Слайдер (или ввод числа)
-            send_qty = act_col1.number_input("Сколько отправить?", min_value=0.1, max_value=max_qty, value=max_qty, step=1.0)
-            
-            # Выбор объекта
-            target_obj = act_col2.selectbox("Куда?", options=st.session_state['object_list'])
-            
-            # Кнопка
-            if act_col3.button("🚀 ОТПРАВИТЬ ЧАСТЬ", type="primary", use_container_width=True):
-                # 1. Сохраняем в Гугл
-                if save_single_row(row, target_obj, send_qty):
-                    # 2. Вычисляем остаток
-                    new_qty = max_qty - send_qty
-                    
-                    # 3. Обновляем таблицу в памяти
-                    idx = row.name # Индекс строки
-                    
-                    if new_qty <= 0:
-                        # Если отправили всё - удаляем строку
-                        st.session_state['df'] = st.session_state['df'].drop(index=idx).reset_index(drop=True)
-                    else:
-                        # Если осталось - обновляем количество и снимаем галочку
-                        st.session_state['df'].at[idx, 'quantity'] = new_qty
-                        st.session_state['df'].at[idx, 'select'] = False
-                        
-                    st.success(f"Уехало {send_qty} {row['unit']} на {target_obj}")
-                    time.sleep(0.5)
+        count_selected = len(edited_df[edited_df['select'] == True])
+        panel_col1, panel_col2 = st.columns([2, 1])
+        
+        target_obj = panel_col1.selectbox("Куда везем?", options=st.session_state['object_list'])
+        
+        btn_type = "primary" if count_selected > 0 else "secondary"
+        btn_text = f"🚀 ОТПРАВИТЬ ({count_selected} поз.)" if count_selected > 0 else "Выберите позиции"
+        
+        if panel_col2.button(btn_text, type=btn_type, use_container_width=True):
+            if count_selected == 0:
+                st.warning("Сначала поставь галочки ✅!")
+            else:
+                success, updated_df = save_and_update(edited_df, target_obj)
+                if success:
+                    st.session_state['df'] = updated_df
+                    st.balloons()
+                    st.success(f"Успешно отправлено на объект '{target_obj}'!")
+                    time.sleep(1)
                     st.rerun()
 
-        else:
-            # --- РЕЖИМ "МАССОВАЯ ОТПРАВКА" (Без разделения) ---
-            st.warning(f"Выбрано позиций: {count_selected}. В этом режиме товары уедут ЦЕЛИКОМ.")
-            
-            act_col1, act_col2 = st.columns([2, 1])
-            target_obj = act_col1.selectbox("Отправить всё выбранное на:", options=st.session_state['object_list'])
-            
-            if act_col2.button("🚀 ОТПРАВИТЬ ВСЁ", type="primary"):
-                success_count = 0
-                indices_to_drop = []
-                
-                for idx, row in selected_rows.iterrows():
-                    if save_single_row(row, target_obj, row['quantity']):
-                        success_count += 1
-                        indices_to_drop.append(idx)
-                
-                # Удаляем отправленные
-                st.session_state['df'] = st.session_state['df'].drop(index=indices_to_drop).reset_index(drop=True)
-                st.success(f"Отправлено позиций: {success_count}")
-                time.sleep(1)
-                st.rerun()
-
     elif 'df' in st.session_state and st.session_state['df'].empty:
-        st.success("🎉 Список чист! Можно загружать следующий чек.")
+        st.success("🎉 Чек пуст! Все товары распределены.")
         if st.button("Загрузить новый"):
             del st.session_state['df']
             st.rerun()
