@@ -11,7 +11,7 @@ import tempfile
 # ==========================================
 # 1. НАСТРОЙКИ
 # ==========================================
-st.set_page_config(page_title="Учет Стройки Pro", page_icon="🏗️", layout="wide")
+st.set_page_config(page_title="Учет Стройки (Auto)", page_icon="🏗️", layout="wide")
 
 try:
     API_KEY = st.secrets["general"]["gemini_api_key"]
@@ -21,7 +21,6 @@ except Exception as e:
     st.error(f"🚨 Ошибка настройки ключей: {e}")
     st.stop()
 
-# Используем модель PRO - она мощнее и надежнее
 genai.configure(api_key=API_KEY)
 
 CATEGORIES = [
@@ -30,7 +29,44 @@ CATEGORIES = [
 ]
 
 # ==========================================
-# 2. ФУНКЦИИ
+# 2. УМНЫЙ ПОИСК МОДЕЛИ (САМОЛЕЧЕНИЕ)
+# ==========================================
+@st.cache_resource
+def get_working_model_name():
+    """Спрашивает у Google доступные модели и выбирает рабочую"""
+    try:
+        # Получаем список всех моделей, доступных твоему ключу
+        models = list(genai.list_models())
+        
+        # Показываем пользователю (тебе), что видит ключ
+        model_names = [m.name for m in models]
+        # st.write(f"🔧 (Тех. инфо) Доступные модели: {model_names}") 
+        
+        # 1. Ищем Flash (она быстрая)
+        for m in models:
+            if 'generateContent' in m.supported_generation_methods and 'flash' in m.name:
+                return m.name
+        
+        # 2. Если нет Flash, ищем Pro
+        for m in models:
+            if 'generateContent' in m.supported_generation_methods and 'pro' in m.name:
+                return m.name
+                
+        # 3. Если ничего нет, берем любую, которая умеет писать текст
+        for m in models:
+            if 'generateContent' in m.supported_generation_methods:
+                return m.name
+                
+        return "models/gemini-1.5-flash" # Заглушка на крайний случай
+    except Exception as e:
+        st.warning(f"Не удалось получить список моделей ({e}). Пробую стандартную.")
+        return "gemini-1.5-flash"
+
+# Определяем модель 1 раз при запуске
+CURRENT_MODEL_NAME = get_working_model_name()
+
+# ==========================================
+# 3. ФУНКЦИИ
 # ==========================================
 
 @st.cache_data(ttl=60)
@@ -51,26 +87,27 @@ def process_invoice(uploaded_file):
     
     myfile = genai.upload_file(tfile.name)
     
-    with st.status("🧠 ИИ анализирует чек (Модель PRO)...", expanded=True) as status:
+    with st.status(f"🧠 ИИ думает (Использую: {CURRENT_MODEL_NAME})...", expanded=True) as status:
         while myfile.state.name == "PROCESSING":
             time.sleep(1)
             myfile = genai.get_file(myfile.name)
         
-        status.write("✅ Фото обработано, читаем...")
-        # ВОТ ЗДЕСЬ ИСПРАВЛЕНА МОДЕЛЬ И ПРОБЕЛЫ
-        model = genai.GenerativeModel("gemini-1.5-pro")
+        status.write("✅ Фото загружено, анализирую...")
+        
+        # ИСПОЛЬЗУЕМ НАЙДЕННУЮ МОДЕЛЬ
+        model = genai.GenerativeModel(CURRENT_MODEL_NAME)
         
         prompt = f"""
-        Ты профессиональный сметчик. Перенеси данные из чека в JSON.
-        1. Дата (DD.MM.YYYY).
-        2. Позиции товаров.
-        3. Категории из списка: {CATEGORIES}
+        Ты сметчик. Выпиши товары из чека в JSON.
+        1. Date (DD.MM.YYYY).
+        2. Items list.
+        3. Categories: {CATEGORIES}
         
-        Верни ТОЛЬКО JSON:
+        JSON only:
         {{
             "invoice_date": "DD.MM.YYYY",
             "items": [
-                {{ "name": "Название", "quantity": 1.0, "unit": "шт", "price": 100.0, "total": 100.0, "category": "..." }}
+                {{ "name": "Name", "quantity": 1.0, "unit": "шт", "price": 100.0, "total": 100.0, "category": "..." }}
             ]
         }}
         """
@@ -109,12 +146,13 @@ def save_to_google_sheets(df):
         return False
 
 # ==========================================
-# 3. ИНТЕРФЕЙС
+# 4. ИНТЕРФЕЙС
 # ==========================================
 if 'object_list' not in st.session_state:
     st.session_state['object_list'] = get_existing_objects()
 
-st.title("🏗️ Учет Материалов (PRO)")
+st.title(f"🏗️ Учет Материалов")
+st.caption(f"Работаю на модели: {CURRENT_MODEL_NAME}")
 st.markdown("---")
 
 with st.expander("➕ Добавить новый объект"):
