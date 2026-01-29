@@ -32,20 +32,19 @@ CATEGORIES = [
 # 2. ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
 # ==========================================
 
-@st.cache_data(ttl=60) # Кэшируем список объектов на 60 секунд, чтобы не дергать Гугл постоянно
+@st.cache_data(ttl=60) # Кэшируем список объектов на 60 секунд
 def get_existing_objects():
-    """Получает список всех листов из Гугл Таблицы (это и есть наши объекты)"""
+    """Получает список всех листов из Гугл Таблицы"""
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
         creds = ServiceAccountCredentials.from_json_keyfile_dict(google_creds_dict, scope)
         client = gspread.authorize(creds)
         spreadsheet = client.open(SHEET_NAME)
-        # Получаем заголовки всех листов
+        # Получаем названия всех вкладок
         titles = [ws.title for ws in spreadsheet.worksheets()]
         return titles
     except Exception as e:
-        st.error(f"Ошибка связи с Таблицей: {e}")
-        return ["Основной склад"] # Заглушка, если нет связи
+        return ["Основной объект"] # Если ошибка, возвращаем заглушку
 
 def process_invoice(uploaded_file):
     """Отправляет фото в ИИ"""
@@ -64,17 +63,16 @@ def process_invoice(uploaded_file):
         model = genai.GenerativeModel("gemini-1.5-flash")
         
         prompt = f"""
-        Ты профессиональный сметчик. Твоя задача - идеально точно перенести данные из чека в JSON.
-        
-        1. Найди дату чека (Format: DD.MM.YYYY). Если даты нет, используй сегодняшнюю.
-        2. Извлеки каждую позицию товара.
+        Ты профессиональный сметчик. Твоя задача - перенести данные из чека в JSON.
+        1. Найди дату чека (Format: DD.MM.YYYY).
+        2. Извлеки каждую позицию.
         3. Присвой категорию из списка: {CATEGORIES}
         
         Верни ТОЛЬКО валидный JSON:
         {{
             "invoice_date": "DD.MM.YYYY",
             "items": [
-                {{ "name": "Точное название товара", "quantity": 1.0, "unit": "шт/кг/м", "price": 100.0, "total": 100.0, "category": "..." }}
+                {{ "name": "Название", "quantity": 1.0, "unit": "шт", "price": 100.0, "total": 100.0, "category": "..." }}
             ]
         }}
         """
@@ -95,76 +93,56 @@ def save_to_google_sheets(df):
         client = gspread.authorize(creds)
         spreadsheet = client.open(SHEET_NAME)
         
-        # Группируем по объектам
         for obj_name, group in df.groupby("object"):
             try:
                 ws = spreadsheet.worksheet(obj_name)
             except:
-                # Если такого объекта нет - создаем новый лист
+                # Если листа нет - создаем новый
                 ws = spreadsheet.add_worksheet(title=obj_name, rows=1000, cols=10)
                 ws.append_row(["Дата", "Название", "Кол-во", "Ед.", "Цена", "Сумма", "Категория"])
-                # Жирный шрифт для заголовка
-                ws.format('A1:G1', {'textFormat': {'bold': True}})
             
             rows = []
             for _, row in group.iterrows():
                 rows.append([
-                    row['date'], 
-                    row['name'], 
-                    row['quantity'], 
-                    row['unit'], 
-                    row['price'], 
-                    row['total'], 
-                    row['category']
+                    row['date'], row['name'], row['quantity'], row['unit'], 
+                    row['price'], row['total'], row['category']
                 ])
             ws.append_rows(rows)
             
-        # Очищаем кэш объектов, так как мы могли добавить новый
-        get_existing_objects.clear()
+        get_existing_objects.clear() # Сбрасываем кэш, чтобы новый лист появился в списке
         return True
     except Exception as e:
-        st.error(f"Ошибка записи в Таблицу: {e}")
+        st.error(f"Ошибка записи: {e}")
         return False
 
 # ==========================================
-# 3. ИНИЦИАЛИЗАЦИЯ (Загрузка объектов)
+# 3. ИНИЦИАЛИЗАЦИЯ (Загрузка списка объектов)
 # ==========================================
-
-# Загружаем список объектов из Гугл Таблицы при старте
 if 'object_list' not in st.session_state:
-    with st.spinner("Подгружаю список объектов..."):
-        st.session_state['object_list'] = get_existing_objects()
+    st.session_state['object_list'] = get_existing_objects()
 
 # ==========================================
 # 4. ИНТЕРФЕЙС
 # ==========================================
-
 st.title("🏗️ Учет Материалов")
 st.markdown("---")
 
-# --- Блок управления объектами ---
-with st.expander("⚙️ Управление объектами (Добавить новый)", expanded=False):
-    col_new_obj1, col_new_obj2 = st.columns([3, 1])
-    with col_new_obj1:
-        new_obj_name = st.text_input("Название нового объекта (например: ЖК Балтийская)")
-    with col_new_obj2:
-        st.write("") # Отступ
-        st.write("") 
-        if st.button("➕ Добавить в список"):
-            if new_obj_name and new_obj_name not in st.session_state['object_list']:
-                st.session_state['object_list'].append(new_obj_name)
-                st.success(f"Объект '{new_obj_name}' добавлен в список!")
-                time.sleep(1)
-                st.rerun()
-            elif new_obj_name in st.session_state['object_list']:
-                st.warning("Такой объект уже есть!")
+# --- Блок добавления нового объекта ---
+with st.expander("➕ Добавить новый объект (если его нет в списке)"):
+    col_new1, col_new2 = st.columns([3, 1])
+    new_obj_name = col_new1.text_input("Название (например: ЖК Ленина)")
+    if col_new2.button("Добавить"):
+        if new_obj_name and new_obj_name not in st.session_state['object_list']:
+            st.session_state['object_list'].append(new_obj_name)
+            st.success(f"Объект '{new_obj_name}' добавлен!")
+            time.sleep(0.5)
+            st.rerun()
 
-# --- Основная рабочая зона ---
 col1, col2 = st.columns([1, 2], gap="large")
 
 with col1:
-    st.subheader("1. Загрузка чека")
-    upl = st.file_uploader("📸 Сделай фото или выбери файл", type=['jpg', 'png', 'jpeg'])
+    st.subheader("1. Загрузка")
+    upl = st.file_uploader("📸 Фото чека", type=['jpg', 'png', 'jpeg'])
     
     if upl:
         st.image(upl, width=200)
@@ -174,7 +152,7 @@ with col1:
                 df = pd.DataFrame(res['items'])
                 df['date'] = res.get('invoice_date', datetime.now().strftime("%d.%m.%Y"))
                 # По умолчанию ставим первый объект из списка
-                default_obj = st.session_state['object_list'][0] if st.session_state['object_list'] else "Новый объект"
+                default_obj = st.session_state['object_list'][0] if st.session_state['object_list'] else "Склад"
                 df['object'] = default_obj
                 
                 st.session_state['df'] = df
@@ -182,69 +160,38 @@ with col1:
 
 with col2:
     if 'df' in st.session_state:
-        st.subheader("2. Проверка и Распределение")
+        st.subheader("2. Проверка")
         
-        # --- Инструмент массового выбора ---
-        # Позволяет одним кликом поменять объект для ВСЕХ позиций
-        st.info("💡 Можно выбрать объект для всего чека сразу:")
+        # --- Массовый выбор объекта ---
+        st.info("👇 Выбери объект для всего чека сразу:")
         col_bulk1, col_bulk2 = st.columns([2, 1])
-        with col_bulk1:
-            bulk_object = st.selectbox(
-                "Применить ко всем строкам объект:", 
-                options=st.session_state['object_list'],
-                index=0
-            )
-        with col_bulk2:
-            st.write("")
-            st.write("")
-            if st.button("Применить ко всем"):
-                st.session_state['df']['object'] = bulk_object
-                st.rerun()
+        bulk_obj = col_bulk1.selectbox("Назначить всем:", options=st.session_state['object_list'])
         
-        # --- Редактор таблицы ---
+        if col_bulk2.button("Применить ко всем"):
+            st.session_state['df']['object'] = bulk_obj
+            st.rerun()
+        
+        # --- Таблица ---
         edited_df = st.data_editor(
             st.session_state['df'],
             num_rows="dynamic",
             use_container_width=True,
-            height=500,
             column_config={
-                "date": st.column_config.TextColumn("📅 Дата", width="small"),
+                "date": "📅 Дата",
                 "name": st.column_config.TextColumn("📦 Название", width="large"),
-                "quantity": st.column_config.NumberColumn("Кол-во", width="small"),
-                "unit": st.column_config.TextColumn("Ед.", width="small"),
                 "price": st.column_config.NumberColumn("Цена", format="%.0f ₽"),
                 "total": st.column_config.NumberColumn("Сумма", format="%.0f ₽"),
-                "category": st.column_config.SelectboxColumn(
-                    "Категория", 
-                    options=CATEGORIES,
-                    width="medium"
-                ),
-                "object": st.column_config.SelectboxColumn(
-                    "🏠 ОБЪЕКТ", 
-                    options=st.session_state['object_list'], # Берем список из памяти
-                    width="medium",
-                    required=True
-                ),
+                "category": st.column_config.SelectboxColumn("Категория", options=CATEGORIES),
+                "object": st.column_config.SelectboxColumn("🏠 ОБЪЕКТ", options=st.session_state['object_list'], required=True),
             }
         )
         
         st.markdown("---")
         
-        # --- Кнопки сохранения ---
-        btn_col1, btn_col2 = st.columns([3, 1])
-        with btn_col1:
-            if st.button("💾 ЗАПИСАТЬ В ТАБЛИЦУ", type="primary", use_container_width=True):
-                with st.spinner("Записываем данные и создаем листы..."):
-                    if save_to_google_sheets(edited_df):
-                        st.balloons()
-                        st.success("✅ Все сохранено! Данные разнесены по вкладкам.")
-                        time.sleep(2)
-                        del st.session_state['df']
-                        st.rerun()
-        with btn_col2:
-            if st.button("❌ Сброс"):
+        if st.button("💾 ЗАПИСАТЬ В ТАБЛИЦУ", type="primary", use_container_width=True):
+            if save_to_google_sheets(edited_df):
+                st.balloons()
+                st.success("✅ Готово! Данные разнесены.")
+                time.sleep(2)
                 del st.session_state['df']
                 st.rerun()
-
-    else:
-        st.info("👈 Загрузи чек слева, чтобы начать работу.")
